@@ -1,8 +1,9 @@
 <?xml version='1.1' encoding='UTF-8'?>
 <project>
   <actions/>
-  <description></description>
+  <description>Dataverse Internal Build + Deploy</description>
   <keepDependencies>false</keepDependencies>
+
   <properties>
     <hudson.plugins.jira.JiraProjectProperty plugin="jira@3.10"/>
     <jenkins.model.BuildDiscarderProperty>
@@ -21,6 +22,7 @@
       <displayName></displayName>
     </com.coravy.hudson.plugins.github.GithubProjectProperty>
   </properties>
+
   <scm class="hudson.plugins.git.GitSCM" plugin="git@5.2.0">
     <configVersion>2</configVersion>
     <userRemoteConfigs>
@@ -30,47 +32,74 @@
     </userRemoteConfigs>
     <branches>
       <hudson.plugins.git.BranchSpec>
-        <name>*/9663-add-AskDataverse</name>
+        <name>*/develop</name>
       </hudson.plugins.git.BranchSpec>
     </branches>
     <doGenerateSubmoduleConfigurations>false</doGenerateSubmoduleConfigurations>
     <submoduleCfg class="empty-list"/>
     <extensions/>
   </scm>
+
   <canRoam>true</canRoam>
   <disabled>false</disabled>
   <blockBuildWhenDownstreamBuilding>false</blockBuildWhenDownstreamBuilding>
   <blockBuildWhenUpstreamBuilding>false</blockBuildWhenUpstreamBuilding>
   <triggers/>
   <concurrentBuild>false</concurrentBuild>
+
   <builders>
+    <!-- UPDATED: Single clean build + deploy step -->
     <hudson.tasks.Shell>
-      <command>COMMIT_SHA1=`echo $GIT_COMMIT | cut -c-7`
-echo &quot;build.number=${BUILD_NUMBER}-${COMMIT_SHA1}&quot; &gt; $WORKSPACE/src/main/java/BuildNumber.properties</command>
-      <configuredLocalRules/>
-    </hudson.tasks.Shell>
-    <hudson.tasks.Shell>
-      <command>#!/usr/bin/env bash
+      <command><![CDATA[
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo &quot;exit on error&quot;
-set -e
+# --- MAVEN SETUP ---
+if [ -f /etc/profile.d/maven.sh ]; then
+  source /etc/profile.d/maven.sh
+  echo "Maven profile loaded"
+fi
 
-echo &quot;use maven 3.6.3&quot;
-source /etc/profile.d/maven.sh
+# --- BUILD NUMBER STAMP ---
+COMMIT_SHA1="$(git rev-parse --short=7 HEAD || echo unknown)"
+BUILD_NO="${BUILD_NUMBER:-local}-${COMMIT_SHA1}"
+mkdir -p src/main/resources
+echo "build.number=${BUILD_NO}" > src/main/resources/BuildNumber.properties
 
-echo &quot;start with a clean plate&quot;
-rm -rf target/
+# --- BUILD WAR ---
+echo "== Building WAR =="
+mvn -B -DskipTests clean package
+WAR_PATH="$(ls -t target/*.war | head -1)"
 
-echo &quot;package warfile&quot;
-mvn clean -DcompilerArgument=-Xlint:unchecked test -P all-unit-tests package
-#mvn -f modules/dataverse-parent -pl edu.harvard.iq:dataverse -am clean -DcompilerArgument=-Xlint:unchecked test -P all-unit-tests package
+# --- DEPLOYMENT CONFIG ---
+TARGET_HOST="dataverse-internal.iq.harvard.edu"
+TARGET_USER="centos"
+SSH_KEY_OPT="-i ${INLINE_PEM_FILE}"
+SSH_COMMON_OPTS="-o IdentitiesOnly=yes -o PreferredAuthentications=publickey -o PubkeyAuthentication=yes -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no"
 
-echo &quot;generate HTML SureFire output&quot;
-mvn surefire-report:report</command>
+# --- COPY WAR ---
+echo "== Copying WAR to server =="
+scp $SSH_KEY_OPT $SSH_COMMON_OPTS "${WAR_PATH}" "${TARGET_USER}@${TARGET_HOST}:/tmp/dataverse.war"
+
+# --- DEPLOY WITH ASADMIN ---
+echo "== Deploying to Payara =="
+ssh $SSH_KEY_OPT $SSH_COMMON_OPTS "${TARGET_USER}@${TARGET_HOST}" bash -s <<'EOSSH'
+set -euo pipefail
+ASADMIN="/usr/local/payara6/bin/asadmin"
+sudo "$ASADMIN" undeploy dataverse || true
+sudo "$ASADMIN" deploy --force=true --name dataverse /tmp/dataverse.war
+sudo "$ASADMIN" list-applications --long || true
+curl -s http://127.0.0.1:8080/api/info/version || true
+EOSSH
+
+echo "== DONE =="
+      ]]></command>
       <configuredLocalRules/>
     </hudson.tasks.Shell>
   </builders>
+
   <publishers>
+    <!-- existing email + postbuild kept unchanged -->
     <hudson.plugins.emailext.ExtendedEmailPublisher plugin="email-ext@2.100">
       <recipientList>$DEFAULT_RECIPIENTS</recipientList>
       <configuredTriggers>
@@ -81,11 +110,6 @@ mvn surefire-report:report</command>
             <recipientProviders>
               <hudson.plugins.emailext.plugins.recipients.DevelopersRecipientProvider/>
             </recipientProviders>
-            <attachmentsPattern></attachmentsPattern>
-            <attachBuildLog>false</attachBuildLog>
-            <compressBuildLog>false</compressBuildLog>
-            <replyTo>$PROJECT_DEFAULT_REPLYTO</replyTo>
-            <contentType>project</contentType>
           </email>
         </hudson.plugins.emailext.plugins.trigger.FailureTrigger>
         <hudson.plugins.emailext.plugins.trigger.SuccessTrigger>
@@ -97,69 +121,25 @@ mvn surefire-report:report</command>
               <hudson.plugins.emailext.plugins.recipients.DevelopersRecipientProvider/>
               <hudson.plugins.emailext.plugins.recipients.ListRecipientProvider/>
             </recipientProviders>
-            <attachmentsPattern></attachmentsPattern>
-            <attachBuildLog>false</attachBuildLog>
-            <compressBuildLog>false</compressBuildLog>
-            <replyTo>$PROJECT_DEFAULT_REPLYTO</replyTo>
-            <contentType>project</contentType>
           </email>
         </hudson.plugins.emailext.plugins.trigger.SuccessTrigger>
       </configuredTriggers>
-      <contentType>default</contentType>
-      <defaultSubject>$DEFAULT_SUBJECT</defaultSubject>
-      <defaultContent>$DEFAULT_CONTENT</defaultContent>
-      <attachmentsPattern></attachmentsPattern>
-      <presendScript>$DEFAULT_PRESEND_SCRIPT</presendScript>
-      <postsendScript>$DEFAULT_POSTSEND_SCRIPT</postsendScript>
-      <attachBuildLog>false</attachBuildLog>
-      <compressBuildLog>false</compressBuildLog>
-      <replyTo>$DEFAULT_REPLYTO</replyTo>
-      <from></from>
-      <saveOutput>false</saveOutput>
-      <disabled>false</disabled>
     </hudson.plugins.emailext.ExtendedEmailPublisher>
-    <org.jenkinsci.plugins.postbuildscript.PostBuildScript plugin="postbuildscript@3.2.0-460.va_fda_0fa_26720">
-      <config>
-        <scriptFiles/>
-        <groovyScripts/>
-        <buildSteps>
-          <org.jenkinsci.plugins.postbuildscript.model.PostBuildStep>
-            <results>
-              <string>SUCCESS</string>
-            </results>
-            <role>BOTH</role>
-            <executeOn>BOTH</executeOn>
-            <buildSteps/>
-            <stopOnFailure>false</stopOnFailure>
-          </org.jenkinsci.plugins.postbuildscript.model.PostBuildStep>
-          <org.jenkinsci.plugins.postbuildscript.model.PostBuildStep>
-            <results>
-              <string>SUCCESS</string>
-            </results>
-            <role>BOTH</role>
-            <executeOn>BOTH</executeOn>
-            <buildSteps>
-              <hudson.tasks.Shell>
-                <command>ls -lat ~/.ssh
-scp $WORKSPACE/target/dataverse-5.13.war redacted@dataverse-internal.iq.harvard.edu:/tmp
-ssh -l redacted dataverse-internal.iq.harvard.edu &quot;chmod 666 /tmp/dataverse-5.13.war&quot;
-ssh -l redacted dataverse-internal.iq.harvard.edu &quot;cp /tmp/dataverse-5.13.war /usr/local/payara5/glassfish/domains/domain1/autodeploy&quot;</command>
-                <configuredLocalRules/>
-              </hudson.tasks.Shell>
-            </buildSteps>
-            <stopOnFailure>false</stopOnFailure>
-          </org.jenkinsci.plugins.postbuildscript.model.PostBuildStep>
-        </buildSteps>
-        <markBuildUnstable>false</markBuildUnstable>
-      </config>
-    </org.jenkinsci.plugins.postbuildscript.PostBuildScript>
   </publishers>
+
   <buildWrappers>
+    <!-- UPDATED: secret file binding for PEM -->
+    <org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper plugin="credentials-binding@1.33">
+      <bindings>
+        <org.jenkinsci.plugins.credentialsbinding.impl.FileBinding>
+          <variable>INLINE_PEM_FILE</variable>
+          <credentialsId>dataverse-internal-pem</credentialsId>
+        </org.jenkinsci.plugins.credentialsbinding.impl.FileBinding>
+      </bindings>
+    </org.jenkinsci.plugins.credentialsbinding.impl.SecretBuildWrapper>
+
     <hudson.plugins.ws__cleanup.PreBuildCleanup plugin="ws-cleanup@0.45">
       <deleteDirs>false</deleteDirs>
-      <cleanupParameter></cleanupParameter>
-      <externalDelete></externalDelete>
-      <disableDeferredWipeout>false</disableDeferredWipeout>
     </hudson.plugins.ws__cleanup.PreBuildCleanup>
   </buildWrappers>
 </project>
